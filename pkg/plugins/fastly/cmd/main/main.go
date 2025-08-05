@@ -141,6 +141,7 @@ func (f *FastlyCostSource) getInvoicesForPeriod(start, end *time.Time) ([]fastly
 		}
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("Fastly-Key", f.apiKey)
+		req.Header.Set("Host", "api.fastly.com")
 
 		resp, err := f.httpClient.Do(req)
 		if err != nil {
@@ -200,6 +201,45 @@ func (f *FastlyCostSource) getMonthToDateInvoice() (*fastlyplugin.Invoice, error
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Fastly-Key", f.apiKey)
+	req.Header.Set("Host", "api.fastly.com")
+
+	resp, err := f.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error making request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var invoice fastlyplugin.Invoice
+	if err := json.NewDecoder(resp.Body).Decode(&invoice); err != nil {
+		return nil, fmt.Errorf("error decoding response: %v", err)
+	}
+
+	return &invoice, nil
+}
+
+func (f *FastlyCostSource) getInvoiceByID(invoiceID string) (*fastlyplugin.Invoice, error) {
+	// Rate limiting
+	if f.rateLimiter.Tokens() < 1.0 {
+		log.Infof("fastly rate limit reached. holding request until rate capacity is back")
+	}
+	err := f.rateLimiter.WaitN(context.TODO(), 1)
+	if err != nil {
+		return nil, fmt.Errorf("error waiting on rate limiter: %v", err)
+	}
+
+	reqURL := fmt.Sprintf("%s/billing/v3/invoices/%s", fastlyAPIBaseURL, invoiceID)
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %v", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Fastly-Key", f.apiKey)
+	req.Header.Set("Host", "api.fastly.com")
 
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
@@ -334,9 +374,9 @@ func boilerplateFastlyCustomCost(win opencost.Window) pb.CustomCostResponse {
 
 func main() {
 	// Get config file path from environment variable or use default
-	configFile := os.Getenv("PLUGIN_CONFIG_FILE")
+	configFile := os.Getenv("FASTLY_PLUGIN_CONFIG_FILE")
 	if configFile == "" {
-		configFile = "/opt/opencost/plugin/config.json"
+		configFile = "/opt/opencost/plugin/fastlyconfig.json"
 	}
 
 	fastlyConfig, err := getFastlyConfig(configFile)
