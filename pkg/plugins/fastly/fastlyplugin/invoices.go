@@ -15,7 +15,7 @@ type Invoice struct {
 	BillingEndDate           string                `json:"billing_end_date"`
 	StatementNumber          string                `json:"statement_number"`
 	CurrencyCode             string                `json:"currency_code"`
-	MonthlyTransactionAmount float64               `json:"monthly_transaction_amount"`
+	MonthlyTransactionAmount string                `json:"monthly_transaction_amount"`
 	PaymentStatus            string                `json:"payment_status,omitempty"`
 	TransactionLineItems     []TransactionLineItem `json:"transaction_line_items"`
 }

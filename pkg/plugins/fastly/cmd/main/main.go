@@ -373,10 +373,18 @@ func boilerplateFastlyCustomCost(win opencost.Window) pb.CustomCostResponse {
 }
 
 func main() {
-	// Get config file path from environment variable or use default
-	configFile := os.Getenv("FASTLY_PLUGIN_CONFIG_FILE")
+	// Check command line args first
+	configFile := ""
+	if len(os.Args) > 1 {
+		configFile = os.Args[1]
+	}
+
+	// If no command line args, try environment variable or default
 	if configFile == "" {
-		configFile = "/opt/opencost/plugin/fastlyconfig.json"
+		configFile = os.Getenv("FASTLY_PLUGIN_CONFIG_FILE")
+		if configFile == "" {
+			configFile = "/opt/opencost/plugin/fastlyconfig.json"
+		}
 	}
 
 	fastlyConfig, err := getFastlyConfig(configFile)
