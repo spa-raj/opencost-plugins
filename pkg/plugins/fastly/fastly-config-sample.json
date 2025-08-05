@@ -1,0 +1,9 @@
+{
+  "fastly_api_token": "YOUR_FASTLY_API_TOKEN_HERE",
+  "fastly_account_id": "",
+  "log_level": "info",
+  "rate_limit_per_second": 1.0,
+  "enable_usage_detail": false,
+  "service_filters": [],
+  "exclude_services": []
+}
