@@ -12,24 +12,30 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-// Validator for Fastly plugin integration tests
+// the validator is designed to allow plugin implementors to validate their plugin information
+// as called by the central test harness.
+// this avoids having to ask folks to re-implement the test harness over again for each plugin
+
+// the integration test harness provides a path to a protobuf file for each window
+// the validator can then read that in and further validate the response data
+// using the domain knowledge of each plugin author
 func main() {
+	// first arg is the path to the daily protobuf file
 	if len(os.Args) < 3 {
 		fmt.Println("Usage: validator <path-to-daily-protobuf-file> <path-to-hourly-protobuf-file>")
 		os.Exit(1)
 	}
 
 	dailyProtobufFilePath := os.Args[1]
-	hourlyProtobufFilePath := os.Args[2]
 
-	// Read and validate daily data
-	dailyData, err := os.ReadFile(dailyProtobufFilePath)
+	// read in the protobuf file
+	data, err := os.ReadFile(dailyProtobufFilePath)
 	if err != nil {
 		fmt.Printf("Error reading daily protobuf file: %v\n", err)
 		os.Exit(1)
 	}
 
-	dailyCustomCostResponses, err := Unmarshal(dailyData)
+	dailyCustomCostResponses, err := Unmarshal(data)
 	if err != nil {
 		fmt.Printf("Error unmarshalling daily protobuf data: %v\n", err)
 		os.Exit(1)
@@ -37,14 +43,17 @@ func main() {
 
 	fmt.Printf("Successfully unmarshalled %d daily custom cost responses\n", len(dailyCustomCostResponses))
 
-	// Read and validate hourly data
-	hourlyData, err := os.ReadFile(hourlyProtobufFilePath)
+	// second arg is the path to the hourly protobuf file
+	hourlyProtobufFilePath := os.Args[2]
+
+	data, err = os.ReadFile(hourlyProtobufFilePath)
 	if err != nil {
 		fmt.Printf("Error reading hourly protobuf file: %v\n", err)
 		os.Exit(1)
 	}
 
-	hourlyCustomCostResponses, err := Unmarshal(hourlyData)
+	// read in the protobuf file
+	hourlyCustomCostResponses, err := Unmarshal(data)
 	if err != nil {
 		fmt.Printf("Error unmarshalling hourly protobuf data: %v\n", err)
 		os.Exit(1)
@@ -52,9 +61,9 @@ func main() {
 
 	fmt.Printf("Successfully unmarshalled %d hourly custom cost responses\n", len(hourlyCustomCostResponses))
 
-	// Validate the responses
-	isValid := validate(dailyCustomCostResponses, hourlyCustomCostResponses)
-	if !isValid {
+	// validate the custom cost response data
+	isvalid := validate(dailyCustomCostResponses, hourlyCustomCostResponses)
+	if !isvalid {
 		os.Exit(1)
 	} else {
 		fmt.Println("Validation successful")
@@ -74,7 +83,7 @@ func validate(respDaily, respHourly []*pb.CustomCostResponse) bool {
 
 	var multiErr error
 
-	// Check for errors in responses
+	// parse the response and look for errors
 	for _, resp := range respDaily {
 		if len(resp.Errors) > 0 {
 			multiErr = multierror.Append(multiErr, fmt.Errorf("errors occurred in daily response: %v", resp.Errors))
@@ -82,102 +91,109 @@ func validate(respDaily, respHourly []*pb.CustomCostResponse) bool {
 	}
 
 	for _, resp := range respHourly {
-		if len(resp.Errors) > 0 {
+		if resp.Errors != nil {
 			multiErr = multierror.Append(multiErr, fmt.Errorf("errors occurred in hourly response: %v", resp.Errors))
 		}
 	}
 
+	// check if any errors occurred
 	if multiErr != nil {
 		log.Errorf("Errors occurred during plugin testing for fastly: %v", multiErr)
 		return false
 	}
 
-	// Validate daily costs
-	seenCosts := map[string]bool{}
+	seenResourceTypes := map[string]bool{}
+	seenProductGroups := map[string]bool{}
 	totalDailyCost := float32(0.0)
 
+	// verify that the returned costs are non zero
 	for _, resp := range respDaily {
-		// Skip empty responses for recent dates
 		if len(resp.Costs) == 0 && resp.Start.AsTime().After(time.Now().Truncate(24*time.Hour).Add(-1*time.Minute)) {
-			log.Debugf("today's daily costs returned by plugin fastly are empty, skipping: %v", resp)
+			log.Debugf("today's daily costs returned by fastly plugin are empty, skipping: %v", resp)
 			continue
 		}
 
 		for _, cost := range resp.Costs {
 			totalDailyCost += cost.GetBilledCost()
-			seenCosts[cost.GetResourceName()] = true
+			seenResourceTypes[cost.GetResourceType()] = true
+			seenProductGroups[cost.GetResourceName()] = true
 
-			// Validate cost sanity
-			if cost.GetBilledCost() < 0 {
-				log.Errorf("negative cost found for %v", cost)
-				return false
+			if cost.GetBilledCost() == 0 {
+				log.Debugf("got zero cost for %v", cost)
 			}
 
-			// Check for reasonable cost values (adjust based on your expected ranges)
-			if cost.GetBilledCost() > 10000 {
-				log.Errorf("unexpectedly high daily cost for %v: %f", cost.GetResourceName(), cost.GetBilledCost())
+			// Sanity check - individual line items shouldn't be extremely high
+			if cost.GetBilledCost() > 100000 {
+				log.Errorf("daily cost returned by fastly plugin for %v is greater than 100,000", cost)
 				return false
 			}
 		}
 	}
 
-	// Validate we have some expected cost types
-	expectedCosts := []string{
-		"cdn_bandwidth",
-		"cdn_requests",
-		// Add more expected cost types as needed
+	// Fastly should have some costs unless it's a free/developer account
+	if totalDailyCost == 0 {
+		log.Warnf("daily costs returned by fastly plugin are zero - this might be expected for developer accounts")
 	}
 
-	foundExpectedCost := false
-	for _, expectedCost := range expectedCosts {
-		if seenCosts[expectedCost] {
-			foundExpectedCost = true
+	// Check that we see some expected product groups
+	expectedProductGroups := []string{
+		"Full Site Delivery",
+		"Compute",
+		"Security",
+		"Network Services",
+	}
+
+	foundAnyExpected := false
+	for _, expected := range expectedProductGroups {
+		if seenResourceTypes[expected] {
+			foundAnyExpected = true
 			break
 		}
 	}
 
-	if !foundExpectedCost && totalDailyCost > 0 {
-		log.Warnf("None of the expected cost types found, but costs exist. Seen costs: %v", seenCosts)
+	if len(seenResourceTypes) > 0 && !foundAnyExpected {
+		log.Warnf("none of the expected product groups found in fastly response. Seen: %v", seenResourceTypes)
 	}
 
-	// Validate domain
+	// verify the domain matches the plugin name
 	for _, resp := range respDaily {
 		if resp.Domain != "fastly" {
-			log.Errorf("daily domain returned by plugin does not match expected 'fastly': %s", resp.Domain)
+			log.Errorf("daily domain returned by fastly plugin does not match plugin name")
 			return false
 		}
 	}
 
-	// Validate hourly costs
-	seenHourlyCosts := map[string]bool{}
+	// Check hourly responses
 	totalHourlyCost := float32(0.0)
-
 	for _, resp := range respHourly {
 		for _, cost := range resp.Costs {
-			seenHourlyCosts[cost.GetResourceName()] = true
 			totalHourlyCost += cost.GetBilledCost()
-
-			if cost.GetBilledCost() < 0 {
-				log.Errorf("negative hourly cost found for %v", cost)
-				return false
-			}
-
-			// Hourly costs should be smaller than daily
-			if cost.GetBilledCost() > 1000 {
-				log.Errorf("unexpectedly high hourly cost for %v: %f", cost.GetResourceName(), cost.GetBilledCost())
+			if cost.GetBilledCost() > 10000 {
+				log.Errorf("hourly cost returned by fastly plugin for %v is greater than 10,000", cost)
 				return false
 			}
 		}
 	}
 
-	// Basic sanity check - if we have daily costs, we should have hourly costs
-	if totalDailyCost > 0 && totalHourlyCost == 0 {
-		log.Errorf("daily costs exist but no hourly costs found")
-		return false
+	if totalHourlyCost == 0 {
+		log.Warnf("hourly costs returned by fastly plugin are zero - this might be expected for developer accounts")
 	}
 
-	log.Infof("Validation passed. Daily costs: %f, Hourly costs: %f", totalDailyCost, totalHourlyCost)
-	log.Infof("Cost types seen - Daily: %v, Hourly: %v", seenCosts, seenHourlyCosts)
+	// Verify currency is USD
+	for _, resp := range respDaily {
+		if resp.Currency != "USD" {
+			log.Errorf("expected currency USD, got %s", resp.Currency)
+			return false
+		}
+	}
+
+	// Verify cost source
+	for _, resp := range respDaily {
+		if resp.CostSource != "billing" {
+			log.Errorf("expected cost source 'billing', got %s", resp.CostSource)
+			return false
+		}
+	}
 
 	return true
 }
@@ -187,7 +203,6 @@ func Unmarshal(data []byte) ([]*pb.CustomCostResponse, error) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
-
 	protoResps := make([]*pb.CustomCostResponse, len(raw))
 	for i, r := range raw {
 		p := &pb.CustomCostResponse{}

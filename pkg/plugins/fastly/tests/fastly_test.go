@@ -1,236 +1,189 @@
 package tests
 
 import (
+	"encoding/json"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
-	fastlyplugin "github.com/opencost/opencost-plugins/pkg/plugins/fastly/plugin"
+	"github.com/opencost/opencost-plugins/pkg/plugins/fastly/fastlyplugin"
+	"github.com/opencost/opencost-plugins/test/pkg/harness"
 	"github.com/opencost/opencost/core/pkg/log"
 	"github.com/opencost/opencost/core/pkg/model/pb"
-	"github.com/opencost/opencost/core/pkg/opencost"
 	"github.com/opencost/opencost/core/pkg/util/timeutil"
-	"golang.org/x/time/rate"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func TestGetCustomCosts(t *testing.T) {
-	// Read necessary env vars
-	fastlyAPIToken := os.Getenv("FASTLY_API_TOKEN")
+func TestFastlyCostRetrieval(t *testing.T) {
+	// Query for last month's data
+	now := time.Now()
+	windowStart := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, time.UTC)
+	windowEnd := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 
-	if fastlyAPIToken == "" {
-		log.Warnf("FASTLY_API_TOKEN undefined, skipping test")
-		t.Skip()
-		return
+	response := getFastlyResponse(t, windowStart, windowEnd, timeutil.Day)
+
+	// confirm no errors in result
+	if len(response) == 0 {
+		t.Fatalf("empty response")
+	}
+	for _, resp := range response {
+		if len(resp.Errors) > 0 {
+			t.Fatalf("got errors in response: %v", resp.Errors)
+		}
 	}
 
-	config := fastlyplugin.FastlyConfig{
-		FastlyAPIToken:     fastlyAPIToken,
-		LogLevel:           "debug",
-		RateLimitPerSecond: 1.0,
+	// confirm results have correct provider
+	for _, resp := range response {
+		if resp.Domain != "fastly" {
+			t.Fatalf("unexpected domain. expected fastly, got %s", resp.Domain)
+		}
 	}
 
-	// Validate config
-	if err := config.Validate(); err != nil {
-		t.Fatalf("config validation failed: %v", err)
-	}
+	// check some attributes of the cost response
+	totalCosts := 0
+	totalBilled := float32(0)
+	for _, resp := range response {
+		// May have zero costs for some days
+		totalCosts += len(resp.Costs)
 
-	// Test rate limiter creation
-	rateLimiter := rate.NewLimiter(rate.Limit(config.RateLimitPerSecond), 1)
+		for _, cost := range resp.Costs {
+			totalBilled += cost.BilledCost
 
-	// Verify rate limiter is configured correctly
-	if rateLimiter.Limit() != rate.Limit(config.RateLimitPerSecond) {
-		t.Errorf("Rate limiter limit mismatch: got %v, want %v", rateLimiter.Limit(), config.RateLimitPerSecond)
-	}
-
-	t.Log("Config validation and rate limiter setup passed")
-}
-
-func TestFastlyConfig(t *testing.T) {
-	tests := []struct {
-		name    string
-		config  fastlyplugin.FastlyConfig
-		wantErr bool
-	}{
-		{
-			name: "valid config",
-			config: fastlyplugin.FastlyConfig{
-				FastlyAPIToken: "test-token",
-				LogLevel:       "info",
-			},
-			wantErr: false,
-		},
-		{
-			name: "missing API token",
-			config: fastlyplugin.FastlyConfig{
-				LogLevel: "info",
-			},
-			wantErr: true,
-		},
-		{
-			name: "default log level",
-			config: fastlyplugin.FastlyConfig{
-				FastlyAPIToken: "test-token",
-			},
-			wantErr: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.config.Validate()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			// Verify required fields are populated
+			if cost.ProviderId == "" {
+				t.Errorf("empty ProviderId")
 			}
-		})
+			if cost.ResourceType == "" {
+				t.Errorf("empty ResourceType")
+			}
+			if cost.ResourceName == "" {
+				t.Errorf("empty ResourceName")
+			}
+		}
+	}
+
+	t.Logf("Total responses: %d, Total costs: %d, Total billed: %.2f", len(response), totalCosts, totalBilled)
+}
+
+func TestFastlyFutureWindow(t *testing.T) {
+	// query for the future
+	windowStart := time.Now().UTC().Truncate(time.Hour).Add(time.Hour)
+	windowEnd := windowStart.Add(time.Hour)
+
+	response := getFastlyResponse(t, windowStart, windowEnd, time.Hour)
+
+	// when we query for data in the future, we expect to get back no data AND no errors
+	if len(response) > 0 {
+		t.Fatalf("got non-empty response for future window")
 	}
 }
 
-func TestInvoiceProcessing(t *testing.T) {
-	// Test invoice processing logic
-	invoice := fastlyplugin.Invoice{
-		ID:               "inv-123",
-		CustomerID:       "cust-456",
-		BillingStartDate: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-		BillingEndDate:   time.Date(2024, 1, 31, 0, 0, 0, 0, time.UTC),
-		Total:            1000.0,
-		Currency:         "USD",
-		LineItems: []fastlyplugin.LineItem{
-			{
-				ID:          "li-1",
-				Description: "CDN Bandwidth",
-				ServiceType: "cdn_bandwidth",
-				Amount:      500.0,
-				Rate:        0.05,
-				Units:       10000,
-				UnitType:    "GB",
-				Total:       500.0,
-				Region:      "us-east-1",
-			},
-			{
-				ID:          "li-2",
-				Description: "CDN Requests",
-				ServiceType: "cdn_requests",
-				Amount:      300.0,
-				Rate:        0.001,
-				Units:       300000,
-				UnitType:    "requests",
-				Total:       300.0,
-				Region:      "us-east-1",
-			},
-		},
+func TestFastlyHourlyData(t *testing.T) {
+	// query for hourly data from yesterday
+	now := time.Now()
+	windowStart := time.Date(now.Year(), now.Month(), now.Day()-1, 0, 0, 0, 0, time.UTC)
+	windowEnd := windowStart.Add(24 * time.Hour)
+
+	response := getFastlyResponse(t, windowStart, windowEnd, time.Hour)
+
+	// Should get 24 responses for hourly data
+	if len(response) != 24 {
+		t.Errorf("expected 24 hourly responses, got %d", len(response))
 	}
 
-	days := invoice.GetDaysInBillingPeriod()
-	if days != 30 {
-		t.Errorf("Expected 30 days, got %d", days)
-	}
+	// Verify each response
+	for i, resp := range response {
+		if len(resp.Errors) > 0 {
+			t.Errorf("errors in hourly response %d: %v", i, resp.Errors)
+		}
 
-	// Test daily rate calculation
-	for _, item := range invoice.LineItems {
-		dailyRate := item.Total / float32(days)
-		if dailyRate <= 0 {
-			t.Errorf("Daily rate should be positive, got %f", dailyRate)
+		// Verify timestamps
+		expectedStart := windowStart.Add(time.Duration(i) * time.Hour)
+		expectedEnd := expectedStart.Add(time.Hour)
+
+		if !resp.Start.AsTime().Equal(expectedStart) {
+			t.Errorf("response %d: expected start %v, got %v", i, expectedStart, resp.Start.AsTime())
+		}
+		if !resp.End.AsTime().Equal(expectedEnd) {
+			t.Errorf("response %d: expected end %v, got %v", i, expectedEnd, resp.End.AsTime())
 		}
 	}
 }
 
-func TestCostResponseStructure(t *testing.T) {
-	// Test the structure of a cost response
-	windowStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	windowEnd := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+func TestFastlyMonthToDate(t *testing.T) {
+	// Query for current month to date
+	now := time.Now()
+	windowStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	windowEnd := now.Truncate(24 * time.Hour)
 
-	resp := &pb.CustomCostResponse{
-		Metadata:   map[string]string{"api_version": "v1"},
-		CostSource: "infrastructure",
-		Domain:     "fastly",
-		Version:    "v1",
-		Currency:   "USD",
-		Start:      timestamppb.New(windowStart),
-		End:        timestamppb.New(windowEnd),
-		Errors:     []string{},
-		Costs: []*pb.CustomCost{
-			{
-				AccountName:    "cust-456",
-				ChargeCategory: "usage",
-				Description:    "CDN Bandwidth",
-				ResourceName:   "cdn_bandwidth",
-				ResourceType:   "cdn",
-				Id:             "inv-123-cdn_bandwidth-2024-01-01",
-				BilledCost:     16.67,
-				ListCost:       16.67,
-				ListUnitPrice:  0.05,
-				UsageQuantity:  333.33,
-				UsageUnit:      "GB",
-				Labels: map[string]string{
-					"service_type": "cdn_bandwidth",
-					"region":       "us-east-1",
-				},
-				Zone: "us-east-1",
-			},
-		},
+	response := getFastlyResponse(t, windowStart, windowEnd, timeutil.Day)
+
+	if len(response) == 0 {
+		t.Fatalf("empty response for month-to-date")
 	}
 
-	// Validate response structure
-	if resp.Domain != "fastly" {
-		t.Errorf("Expected domain 'fastly', got %s", resp.Domain)
+	// Should include current month data
+	foundCurrentMonth := false
+	for _, resp := range response {
+		if resp.Start.AsTime().Month() == now.Month() {
+			foundCurrentMonth = true
+			break
+		}
 	}
 
-	if len(resp.Costs) != 1 {
-		t.Errorf("Expected 1 cost, got %d", len(resp.Costs))
-	}
-
-	if resp.Costs[0].ResourceType != "cdn" {
-		t.Errorf("Expected resource type 'cdn', got %s", resp.Costs[0].ResourceType)
+	if !foundCurrentMonth {
+		t.Errorf("no data found for current month")
 	}
 }
 
-func TestWindowProcessing(t *testing.T) {
-	// Test window processing for different resolutions
-	tests := []struct {
-		name       string
-		start      time.Time
-		end        time.Time
-		resolution time.Duration
-		expected   int
-	}{
-		{
-			name:       "daily resolution",
-			start:      time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-			end:        time.Date(2024, 1, 8, 0, 0, 0, 0, time.UTC),
-			resolution: timeutil.Day,
-			expected:   7,
-		},
-		{
-			name:       "hourly resolution",
-			start:      time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-			end:        time.Date(2024, 1, 1, 6, 0, 0, 0, time.UTC),
-			resolution: time.Hour,
-			expected:   6,
-		},
+func getFastlyResponse(t *testing.T, windowStart, windowEnd time.Time, step time.Duration) []*pb.CustomCostResponse {
+	// read necessary env vars. If any are missing, log warning and skip test
+	fastlyAPIKey := os.Getenv("FASTLY_API_KEY")
+
+	if fastlyAPIKey == "" {
+		log.Warnf("FASTLY_API_KEY undefined, skipping test")
+		t.Skip()
+		return nil
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Test window calculation
-			windows, err := opencost.GetWindows(tt.start, tt.end, tt.resolution)
-			if err != nil {
-				t.Fatalf("Failed to get windows: %v", err)
-			}
-
-			if len(windows) != tt.expected {
-				t.Errorf("Expected %d windows, got %d", tt.expected, len(windows))
-			}
-
-			// Verify each window has the correct duration
-			for i, window := range windows {
-				duration := window.End().Sub(*window.Start())
-				if duration != tt.resolution {
-					t.Errorf("Window %d has incorrect duration: got %v, want %v", i, duration, tt.resolution)
-				}
-			}
-
-			t.Logf("Test case %s: got %d windows as expected", tt.name, len(windows))
-		})
+	// write out config to temp file using contents of env vars
+	config := fastlyplugin.FastlyConfig{
+		FastlyAPIKey: fastlyAPIKey,
+		LogLevel:     "debug",
 	}
+
+	// set up custom cost request
+	file, err := os.CreateTemp("", "fastly_config.json")
+	if err != nil {
+		t.Fatalf("could not create temp config dir: %v", err)
+	}
+	defer os.Remove(file.Name())
+
+	data, err := json.MarshalIndent(config, "", " ")
+	if err != nil {
+		t.Fatalf("could not marshal json: %v", err)
+	}
+
+	err = os.WriteFile(file.Name(), data, fs.FileMode(os.O_RDWR))
+	if err != nil {
+		t.Fatalf("could not write file: %v", err)
+	}
+
+	// invoke plugin via harness
+	_, filename, _, _ := runtime.Caller(0)
+	parent := filepath.Dir(filename)
+	pluginRoot := filepath.Dir(parent)
+	pluginFile := pluginRoot + "/cmd/main/main.go"
+
+	req := pb.CustomCostRequest{
+		Start:      timestamppb.New(windowStart),
+		End:        timestamppb.New(windowEnd),
+		Resolution: durationpb.New(step),
+	}
+
+	return harness.InvokePlugin(file.Name(), pluginFile, &req)
 }
