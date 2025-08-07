@@ -116,7 +116,7 @@ func validate(respDaily, respHourly []*pb.CustomCostResponse) bool {
 		for _, cost := range resp.Costs {
 			totalDailyCost += cost.GetBilledCost()
 			seenResourceTypes[cost.GetResourceType()] = true
-			seenProductGroups[cost.GetResourceName()] = true
+			seenProductGroups[cost.GetResourceType()] = true
 
 			if cost.GetBilledCost() == 0 {
 				log.Debugf("got zero cost for %v", cost)
@@ -145,14 +145,14 @@ func validate(respDaily, respHourly []*pb.CustomCostResponse) bool {
 
 	foundAnyExpected := false
 	for _, expected := range expectedProductGroups {
-		if seenResourceTypes[expected] {
+		if seenProductGroups[expected] {
 			foundAnyExpected = true
 			break
 		}
 	}
 
-	if len(seenResourceTypes) > 0 && !foundAnyExpected {
-		log.Warnf("none of the expected product groups found in fastly response. Seen: %v", seenResourceTypes)
+	if len(seenProductGroups) > 0 && !foundAnyExpected {
+		log.Warnf("none of the expected product groups found in fastly response. Seen product groups: %v", seenProductGroups)
 	}
 
 	// verify the domain matches the plugin name
