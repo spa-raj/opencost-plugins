@@ -412,6 +412,49 @@ func (f *FastlyCostSource) convertInvoiceToCosts(invoice fastlyplugin.Invoice, w
 			region = "Global"
 		}
 
+		// Create extended attributes following FOCUS mapping
+		// According to fastly_focus_mapping.md:
+		// AccountId maps to customer_id (Fastly customer/account ID)
+		extendedAttrs := pb.CustomCostExtendedAttributes{
+			AccountId: &invoice.CustomerID, // FOCUS: AccountId → customer_id
+		}
+
+		// Use product_line as SubAccountId if available for better granularity
+		if item.ProductLine != "" {
+			extendedAttrs.SubAccountId = &item.ProductLine // FOCUS: Subcategory → product_line
+		}
+
+		// Add billing period information
+		// Parse ISO 8601 dates and convert to timestamppb.Timestamp
+		if billingStartTime, err := fastlyplugin.ParseFastlyDate(invoice.BillingStartDate); err == nil {
+			extendedAttrs.BillingPeriodStart = timestamppb.New(billingStartTime) // FOCUS: BillingPeriodStart → billing_start_date
+		}
+		if billingEndTime, err := fastlyplugin.ParseFastlyDate(invoice.BillingEndDate); err == nil {
+			extendedAttrs.BillingPeriodEnd = timestamppb.New(billingEndTime) // FOCUS: BillingPeriodEnd → billing_end_date
+		}
+
+		// Add service information if available
+		if item.ProductGroup != "" {
+			extendedAttrs.ServiceCategory = &item.ProductGroup // FOCUS: ServiceCategory → product_group
+		}
+		if item.ProductName != "" {
+			extendedAttrs.ServiceName = &item.ProductName // FOCUS: ServiceName → product_name
+		}
+
+		// Add pricing information
+		if item.Units > 0 {
+			units := float32(item.Units)
+			extendedAttrs.PricingQuantity = &units // FOCUS: PricingQuantity → units
+		}
+		if item.UsageType != "" {
+			extendedAttrs.PricingUnit = &item.UsageType // FOCUS: PricingUnit → usage_type
+		}
+
+		// Add discount code if available
+		if item.CreditCouponCode != "" {
+			extendedAttrs.CommitmentDiscountId = &item.CreditCouponCode // FOCUS: CommitmentDiscountId → credit_coupon_code
+		}
+
 		cost := &pb.CustomCost{
 			Zone:           region,
 			AccountName:    invoice.CustomerID,
@@ -427,11 +470,12 @@ func (f *FastlyCostSource) convertInvoiceToCosts(invoice fastlyplugin.Invoice, w
 				"credit_coupon_code": item.CreditCouponCode,
 				"currency":           invoice.CurrencyCode,
 			},
-			ListCost:      billedCost,
-			ListUnitPrice: float32(item.Rate),
-			BilledCost:    billedCost,
-			UsageQuantity: usageQuantity,
-			UsageUnit:     getUsageUnit(item.UsageType, item.ProductName),
+			ListCost:           billedCost,
+			ListUnitPrice:      float32(item.Rate),
+			BilledCost:         billedCost,
+			UsageQuantity:      usageQuantity,
+			UsageUnit:          getUsageUnit(item.UsageType, item.ProductName),
+			ExtendedAttributes: &extendedAttrs,
 		}
 
 		// Add additional label for credits/discounts
