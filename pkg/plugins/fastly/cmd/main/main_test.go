@@ -992,3 +992,157 @@ func TestUniqueUUIDGeneration(t *testing.T) {
 
 	t.Logf("Successfully generated %d unique UUIDs for cost items", len(responses[0].Costs))
 }
+
+func TestGetInvoiceByID(t *testing.T) {
+	// Arrange
+	mockClient := &MockHTTPClient{
+		DoFunc: func(req *http.Request) (*http.Response, error) {
+			// Verify the request
+			if req.Method != "GET" {
+				t.Errorf("Expected GET request, got %s", req.Method)
+			}
+			if !strings.Contains(req.URL.Path, "/billing/v3/invoices/inv-12345") {
+				t.Errorf("Expected invoice by ID endpoint, got %s", req.URL.Path)
+			}
+			if req.Header.Get("Fastly-Key") != "test-api-key" {
+				t.Errorf("Expected API key in header")
+			}
+
+			return createMockResponse(200, `{
+                "customer_id": "test-customer",
+                "invoice_id": "inv-12345",
+                "billing_start_date": "2024-01-01T00:00:00Z",
+                "billing_end_date": "2024-01-31T00:00:00Z",
+                "currency_code": "USD",
+                "transaction_line_items": [
+                    {
+                        "description": "CDN Bandwidth",
+                        "amount": 100.50,
+                        "rate": 0.05,
+                        "units": 2010,
+                        "product_name": "CDN",
+                        "product_group": "Full Site Delivery",
+                        "product_line": "Delivery",
+                        "usage_type": "bandwidth",
+                        "region": "North America"
+                    }
+                ]
+            }`), nil
+		},
+	}
+
+	rateLimiter := rate.NewLimiter(rate.Every(time.Second), 10)
+	fastlyCostSrc := FastlyCostSource{
+		apiKey:       "test-api-key",
+		httpClient:   mockClient,
+		rateLimiter:  rateLimiter,
+		invoiceCache: make(map[string][]fastlyplugin.Invoice),
+	}
+
+	// Act
+	invoice, err := fastlyCostSrc.getInvoiceByID("inv-12345")
+
+	// Assert
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if invoice == nil {
+		t.Fatal("Expected invoice, got nil")
+	}
+
+	if invoice.InvoiceID != "inv-12345" {
+		t.Errorf("Expected invoice ID 'inv-12345', got '%s'", invoice.InvoiceID)
+	}
+
+	if invoice.CustomerID != "test-customer" {
+		t.Errorf("Expected customer ID 'test-customer', got '%s'", invoice.CustomerID)
+	}
+
+	if len(invoice.TransactionLineItems) != 1 {
+		t.Errorf("Expected 1 line item, got %d", len(invoice.TransactionLineItems))
+	}
+
+	lineItem := invoice.TransactionLineItems[0]
+	if lineItem.Description != "CDN Bandwidth" {
+		t.Errorf("Expected description 'CDN Bandwidth', got '%s'", lineItem.Description)
+	}
+
+	if lineItem.Amount != 100.50 {
+		t.Errorf("Expected amount 100.50, got %f", lineItem.Amount)
+	}
+}
+
+func TestGetInvoiceByIDError(t *testing.T) {
+	// Arrange
+	mockClient := &MockHTTPClient{
+		DoFunc: func(req *http.Request) (*http.Response, error) {
+			// Verify the request URL contains the invoice ID
+			if !strings.Contains(req.URL.Path, "/billing/v3/invoices/invalid-invoice") {
+				t.Errorf("Expected invoice by ID endpoint with invalid-invoice, got %s", req.URL.Path)
+			}
+			
+			return createMockResponse(404, `{
+                "msg": "Not Found",
+                "detail": "Invoice not found"
+            }`), nil
+		},
+	}
+
+	rateLimiter := rate.NewLimiter(rate.Every(time.Second), 10)
+	fastlyCostSrc := FastlyCostSource{
+		apiKey:       "test-api-key",
+		httpClient:   mockClient,
+		rateLimiter:  rateLimiter,
+		invoiceCache: make(map[string][]fastlyplugin.Invoice),
+	}
+
+	// Act
+	invoice, err := fastlyCostSrc.getInvoiceByID("invalid-invoice")
+
+	// Assert
+	if err == nil {
+		t.Fatal("Expected error, got nil")
+	}
+
+	if invoice != nil {
+		t.Error("Expected nil invoice on error")
+	}
+
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("Expected error message to contain '404', got: %v", err)
+	}
+}
+
+func TestGetInvoiceByIDNetworkError(t *testing.T) {
+	// Arrange
+	mockClient := &MockHTTPClient{
+		DoFunc: func(req *http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("network connection failed")
+		},
+	}
+
+	rateLimiter := rate.NewLimiter(rate.Every(time.Second), 10)
+	fastlyCostSrc := FastlyCostSource{
+		apiKey:       "test-api-key",
+		httpClient:   mockClient,
+		rateLimiter:  rateLimiter,
+		invoiceCache: make(map[string][]fastlyplugin.Invoice),
+	}
+
+	// Act
+	invoice, err := fastlyCostSrc.getInvoiceByID("inv-12345")
+
+	// Assert
+	if err == nil {
+		t.Fatal("Expected error, got nil")
+	}
+
+	if invoice != nil {
+		t.Error("Expected nil invoice on network error")
+	}
+
+	if !strings.Contains(err.Error(), "network connection failed") {
+		t.Errorf("Expected error message to contain 'network connection failed', got: %v", err)
+	}
+}
