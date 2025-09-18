@@ -156,7 +156,7 @@ func getFastlyResponse(t *testing.T, windowStart, windowEnd time.Time, step time
 		LogLevel:     "debug",
 	}
 
-	// set up custom cost request
+	// set up custom cost request and write to temp file
 	file, err := os.CreateTemp("", "fastly_config.json")
 	if err != nil {
 		t.Fatalf("could not create temp config dir: %v", err)
