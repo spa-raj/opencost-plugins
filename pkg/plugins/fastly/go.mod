@@ -2,7 +2,10 @@ module github.com/opencost/opencost-plugins/pkg/plugins/fastly
 
 go 1.24.2
 
+replace github.com/opencost/opencost-plugins/common => ../../common
+
 require (
+	github.com/opencost/opencost-plugins/common v0.0.0-00010101000000-000000000000
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/hashicorp/go-plugin v1.6.3
 	github.com/opencost/opencost-plugins/test v0.0.0-20240429172518-a50cd1290864

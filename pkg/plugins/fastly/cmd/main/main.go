@@ -7,13 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/hashicorp/go-plugin"
+	commonconfig "github.com/opencost/opencost-plugins/common/config"
+	fastlyconfig "github.com/opencost/opencost-plugins/pkg/plugins/fastly/config"
 	"github.com/opencost/opencost-plugins/pkg/plugins/fastly/fastlyplugin"
 	"github.com/opencost/opencost/core/pkg/log"
 	"github.com/opencost/opencost/core/pkg/model/pb"
@@ -139,8 +140,8 @@ func (f *FastlyCostSource) GetCustomCosts(req *pb.CustomCostRequest) []*pb.Custo
 		return results
 	}
 
-	// Store in cache
-	cacheKey := fmt.Sprintf("%s-%s", req.Start.AsTime().Format("2006-01"), req.End.AsTime().Format("2006-01"))
+	// Store in cache with consistent format (day-level granularity)
+	cacheKey := fmt.Sprintf("%s_%s", req.Start.AsTime().Format("2006-01-02"), req.End.AsTime().Format("2006-01-02"))
 	f.invoiceCacheMux.Lock()
 	f.invoiceCache[cacheKey] = allInvoices
 	f.invoiceCacheMux.Unlock()
@@ -259,8 +260,21 @@ func (f *FastlyCostSource) getInvoicesForPeriod(start, end *time.Time) ([]fastly
 		if err != nil {
 			log.Warnf("error fetching month-to-date invoice: %v", err)
 		} else if mtdInvoice != nil {
-			log.Debugf("Including month-to-date invoice: %s", mtdInvoice.InvoiceID)
-			allInvoices = append(allInvoices, *mtdInvoice)
+			// Check for duplicates before adding MTD invoice
+			// MTD invoice should not be in the regular invoice list, but we check to be safe
+			isDuplicate := false
+			for _, existingInvoice := range allInvoices {
+				if existingInvoice.InvoiceID == mtdInvoice.InvoiceID {
+					log.Debugf("Month-to-date invoice %s already exists in invoice list, skipping", mtdInvoice.InvoiceID)
+					isDuplicate = true
+					break
+				}
+			}
+
+			if !isDuplicate {
+				log.Debugf("Including month-to-date invoice: %s", mtdInvoice.InvoiceID)
+				allInvoices = append(allInvoices, *mtdInvoice)
+			}
 		}
 	}
 
@@ -399,8 +413,9 @@ func (f *FastlyCostSource) convertInvoiceToCosts(invoice fastlyplugin.Invoice, w
 			continue
 		}
 
-		// Create provider ID
-		providerID := fmt.Sprintf("%s/%s/%s", invoice.InvoiceID, item.ProductName, item.UsageType)
+		// Create provider ID using CustomerID for stability across billing periods
+		// Using CustomerID instead of InvoiceID ensures the same resource is tracked consistently month-over-month
+		providerID := fmt.Sprintf("%s/%s/%s", invoice.CustomerID, item.ProductName, item.UsageType)
 
 		// Prorate the cost based on window overlap
 		billedCost := float32(item.Amount) * prorateRatio
@@ -580,30 +595,18 @@ func getFastlyHTTPClient() HTTPClient {
 }
 
 func main() {
-	// Check command line args first
-	configFile := ""
-	if len(os.Args) > 1 {
-		configFile = os.Args[1]
+	log.Debug("Initializing Fastly plugin")
+
+	configFile, err := commonconfig.GetConfigFilePath()
+	if err != nil {
+		log.Fatalf("error opening config file: %v", err)
 	}
 
-	// If no command line args, try environment variable or default
-	if configFile == "" {
-		configFile = os.Getenv("FASTLY_PLUGIN_CONFIG_FILE")
-		if configFile == "" {
-			configFile = "/opt/opencost/plugin/fastlyconfig.json"
-		}
-	}
-
-	fastlyConfig, err := getFastlyConfig(configFile)
+	fastlyConfig, err := fastlyconfig.GetFastlyConfig(configFile)
 	if err != nil {
 		log.Fatalf("error building Fastly config: %v", err)
 	}
 	log.SetLogLevel(fastlyConfig.LogLevel)
-
-	// Validate API key
-	if fastlyConfig.FastlyAPIKey == "" {
-		log.Fatalf("Fastly API key is required but not provided in config")
-	}
 
 	// Fastly rate limiting - 6000 requests per minute = 100 requests per second
 	// Being slightly conservative at 90 requests per second to avoid hitting limits
@@ -627,22 +630,4 @@ func main() {
 		Plugins:         pluginMap,
 		GRPCServer:      plugin.DefaultGRPCServer,
 	})
-}
-
-func getFastlyConfig(configFilePath string) (*fastlyplugin.FastlyConfig, error) {
-	var result fastlyplugin.FastlyConfig
-	bytes, err := os.ReadFile(configFilePath)
-	if err != nil {
-		return nil, fmt.Errorf("error reading config file for Fastly config @ %s: %v", configFilePath, err)
-	}
-	err = json.Unmarshal(bytes, &result)
-	if err != nil {
-		return nil, fmt.Errorf("error marshaling json into Fastly config: %v", err)
-	}
-
-	if result.LogLevel == "" {
-		result.LogLevel = "info"
-	}
-
-	return &result, nil
 }

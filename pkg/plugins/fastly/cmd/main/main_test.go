@@ -4,9 +4,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	_ "net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -104,7 +101,7 @@ func TestValidateRequest(t *testing.T) {
 			name: "Multiple validation errors",
 			req: &pb.CustomCostRequest{
 				Start:      timestamppb.New(now.AddDate(0, -13, 0)), // Too far in past
-				End:        timestamppb.New(now.AddDate(0, -14, 0)), // Before start  
+				End:        timestamppb.New(now.AddDate(0, -14, 0)), // Before start
 				Resolution: durationpb.New(30 * time.Minute),        // Too small
 			},
 			expectedErrors: 3,
@@ -142,98 +139,7 @@ func TestValidateRequest(t *testing.T) {
 	}
 }
 
-func TestGetFastlyConfig(t *testing.T) {
-	// Arrange
-	tempDir := t.TempDir()
-	configPath := filepath.Join(tempDir, "config.json")
-	configData := `{
-        "fastly_api_key": "test-api-key",
-        "log_level": "debug"
-    }`
-	err := os.WriteFile(configPath, []byte(configData), 0644)
-	if err != nil {
-		t.Fatalf("Failed to create test config file: %v", err)
-	}
-
-	// Act
-	config, err := getFastlyConfig(configPath)
-
-	// Assert
-	if err != nil {
-		t.Fatalf("getFastlyConfig returned error: %v", err)
-	}
-	if config == nil {
-		t.Fatal("Expected config to be non-nil")
-	}
-	if config.FastlyAPIKey != "test-api-key" {
-		t.Errorf("Expected API key 'test-api-key', got '%s'", config.FastlyAPIKey)
-	}
-	if config.LogLevel != "debug" {
-		t.Errorf("Expected log level 'debug', got '%s'", config.LogLevel)
-	}
-}
-
-func TestGetFastlyConfigDefaultLogLevel(t *testing.T) {
-	// Arrange
-	tempDir := t.TempDir()
-	configPath := filepath.Join(tempDir, "config.json")
-	configData := `{
-        "fastly_api_key": "test-api-key"
-    }`
-	err := os.WriteFile(configPath, []byte(configData), 0644)
-	if err != nil {
-		t.Fatalf("Failed to create test config file: %v", err)
-	}
-
-	// Act
-	config, err := getFastlyConfig(configPath)
-
-	// Assert
-	if err != nil {
-		t.Fatalf("getFastlyConfig returned error: %v", err)
-	}
-	if config.LogLevel != "info" {
-		t.Errorf("Expected default log level 'info', got '%s'", config.LogLevel)
-	}
-}
-
-func TestGetFastlyConfigInvalidPath(t *testing.T) {
-	// Arrange
-	configPath := "/nonexistent/path/to/config.json"
-
-	// Act
-	config, err := getFastlyConfig(configPath)
-
-	// Assert
-	if err == nil {
-		t.Error("Expected error for nonexistent config file, got nil")
-	}
-	if config != nil {
-		t.Error("Expected nil config for invalid path")
-	}
-}
-
-func TestGetFastlyConfigInvalidJSON(t *testing.T) {
-	// Arrange
-	tempDir := t.TempDir()
-	configPath := filepath.Join(tempDir, "config.json")
-	invalidJSON := `{ invalid json }`
-	err := os.WriteFile(configPath, []byte(invalidJSON), 0644)
-	if err != nil {
-		t.Fatalf("Failed to create test config file: %v", err)
-	}
-
-	// Act
-	config, err := getFastlyConfig(configPath)
-
-	// Assert
-	if err == nil {
-		t.Error("Expected error for invalid JSON, got nil")
-	}
-	if config != nil {
-		t.Error("Expected nil config for invalid JSON")
-	}
-}
+// Config tests have been moved to config/fastlyconfig_test.go
 
 func TestGetMonthToDateInvoice(t *testing.T) {
 	// Arrange
@@ -978,8 +884,8 @@ func TestUniqueUUIDGeneration(t *testing.T) {
 			t.Errorf("Cost %d ID '%s' doesn't contain hyphens (expected UUID format)", i, cost.Id)
 		}
 
-		// Verify ProviderId is still constructed properly (should be different from ID)
-		expectedProviderID := fmt.Sprintf("inv-12345/%s/%s", cost.Labels["product_name"], cost.ResourceName)
+		// Verify ProviderId is constructed with CustomerID (not InvoiceID) for stability
+		expectedProviderID := fmt.Sprintf("test-customer/%s/%s", cost.Labels["product_name"], cost.ResourceName)
 		if cost.ProviderId != expectedProviderID {
 			t.Errorf("Cost %d has unexpected ProviderId. Expected %s, got %s", i, expectedProviderID, cost.ProviderId)
 		}
@@ -1081,7 +987,7 @@ func TestGetInvoiceByIDError(t *testing.T) {
 			if !strings.Contains(req.URL.Path, "/billing/v3/invoices/invalid-invoice") {
 				t.Errorf("Expected invoice by ID endpoint with invalid-invoice, got %s", req.URL.Path)
 			}
-			
+
 			return createMockResponse(404, `{
                 "msg": "Not Found",
                 "detail": "Invoice not found"
