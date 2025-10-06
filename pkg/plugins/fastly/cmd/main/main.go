@@ -587,10 +587,10 @@ func boilerplateFastlyCustomCost(win opencost.Window) pb.CustomCostResponse {
 	}
 }
 
-// getFastlyHTTPClient returns an HTTP client for Fastly API
-func getFastlyHTTPClient() HTTPClient {
+// getFastlyHTTPClient returns an HTTP client for Fastly API with configurable timeout
+func getFastlyHTTPClient(timeoutSeconds int) HTTPClient {
 	return &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: time.Duration(timeoutSeconds) * time.Second,
 	}
 }
 
@@ -614,7 +614,7 @@ func main() {
 
 	fastlyCostSrc := FastlyCostSource{
 		apiKey:       fastlyConfig.FastlyAPIKey,
-		httpClient:   getFastlyHTTPClient(), // Use the new function
+		httpClient:   getFastlyHTTPClient(fastlyConfig.HTTPTimeoutSec),
 		rateLimiter:  rateLimiter,
 		invoiceCache: make(map[string][]fastlyplugin.Invoice),
 	}

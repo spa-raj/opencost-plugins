@@ -7,8 +7,9 @@ import (
 )
 
 type FastlyConfig struct {
-	FastlyAPIKey string `json:"fastly_api_key"`
-	LogLevel     string `json:"log_level"`
+	FastlyAPIKey   string `json:"fastly_api_key"`
+	LogLevel       string `json:"log_level"`
+	HTTPTimeoutSec int    `json:"http_timeout_sec"`
 }
 
 func GetFastlyConfig(configFilePath string) (*FastlyConfig, error) {
@@ -25,6 +26,16 @@ func GetFastlyConfig(configFilePath string) (*FastlyConfig, error) {
 	// Set default log level if not specified
 	if result.LogLevel == "" {
 		result.LogLevel = "info"
+	}
+
+	// Set default HTTP timeout if not specified (30 seconds for backward compatibility)
+	if result.HTTPTimeoutSec <= 0 {
+		result.HTTPTimeoutSec = 30
+	}
+
+	// Validate timeout is reasonable (between 1 and 300 seconds / 5 minutes)
+	if result.HTTPTimeoutSec > 300 {
+		return nil, fmt.Errorf("HTTP timeout must be between 1 and 300 seconds, got %d", result.HTTPTimeoutSec)
 	}
 
 	// Validate required fields

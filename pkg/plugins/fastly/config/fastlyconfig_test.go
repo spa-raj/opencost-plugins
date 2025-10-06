@@ -150,3 +150,119 @@ func TestGetFastlyConfigEmptyAPIKey(t *testing.T) {
 		t.Error("Expected nil config when API key is empty")
 	}
 }
+
+func TestGetFastlyConfigDefaultHTTPTimeout(t *testing.T) {
+	// Arrange
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	configData := `{
+        "fastly_api_key": "test-api-key"
+    }`
+	err := os.WriteFile(configPath, []byte(configData), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test config file: %v", err)
+	}
+
+	// Act
+	config, err := GetFastlyConfig(configPath)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("GetFastlyConfig returned error: %v", err)
+	}
+	if config.HTTPTimeoutSec != 30 {
+		t.Errorf("Expected default HTTP timeout 30 seconds, got %d", config.HTTPTimeoutSec)
+	}
+}
+
+func TestGetFastlyConfigCustomHTTPTimeout(t *testing.T) {
+	// Arrange
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	configData := `{
+        "fastly_api_key": "test-api-key",
+        "http_timeout_sec": 60
+    }`
+	err := os.WriteFile(configPath, []byte(configData), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test config file: %v", err)
+	}
+
+	// Act
+	config, err := GetFastlyConfig(configPath)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("GetFastlyConfig returned error: %v", err)
+	}
+	if config.HTTPTimeoutSec != 60 {
+		t.Errorf("Expected HTTP timeout 60 seconds, got %d", config.HTTPTimeoutSec)
+	}
+}
+
+func TestGetFastlyConfigInvalidHTTPTimeout(t *testing.T) {
+	// Arrange
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	configData := `{
+        "fastly_api_key": "test-api-key",
+        "http_timeout_sec": 500
+    }`
+	err := os.WriteFile(configPath, []byte(configData), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test config file: %v", err)
+	}
+
+	// Act
+	config, err := GetFastlyConfig(configPath)
+
+	// Assert
+	if err == nil {
+		t.Error("Expected error for timeout > 300 seconds, got nil")
+	}
+	if config != nil {
+		t.Error("Expected nil config for invalid timeout")
+	}
+	if err != nil && !contains(err.Error(), "HTTP timeout must be between 1 and 300 seconds") {
+		t.Errorf("Expected timeout validation error, got: %v", err)
+	}
+}
+
+func TestGetFastlyConfigNegativeHTTPTimeout(t *testing.T) {
+	// Arrange
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	configData := `{
+        "fastly_api_key": "test-api-key",
+        "http_timeout_sec": -10
+    }`
+	err := os.WriteFile(configPath, []byte(configData), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test config file: %v", err)
+	}
+
+	// Act
+	config, err := GetFastlyConfig(configPath)
+
+	// Assert - negative values should default to 30
+	if err != nil {
+		t.Fatalf("GetFastlyConfig returned error: %v", err)
+	}
+	if config.HTTPTimeoutSec != 30 {
+		t.Errorf("Expected default HTTP timeout 30 seconds for negative value, got %d", config.HTTPTimeoutSec)
+	}
+}
+
+// Helper function to check if string contains substring
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || (len(s) > 0 && len(substr) > 0 && findSubstring(s, substr)))
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
